@@ -1,15 +1,22 @@
 """
 KPRO Auto Downloader
-Login ke kpro.telkom.co.id, input OTP manual, download file Excel.
+- Ambil captcha dari halaman login
+- Input captcha + OTP manual
+- Centang checkbox agree otomatis
+- Download file Excel
 """
 
 import os
+import re
+import sys
 import time
 import logging
+import subprocess
 import requests
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 load_dotenv()
 
@@ -37,59 +44,153 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8",
-    "Content-Type": "application/json",
 }
 
 
-# ── Input OTP manual ─────────────────────────────────────────────────────────
+# ── Helper ────────────────────────────────────────────────────────────────────
 
-def get_otp_manual() -> str:
-    """Tampilkan prompt ke user dan minta OTP diketik manual."""
-    print("\n" + "="*50)
-    print("  Cek Telegram kamu — OTP sudah dikirim oleh")
-    print("  @kproverification_newbot")
-    print("="*50)
+def buka_gambar(path: Path) -> None:
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(path)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(path)], check=False)
+    except Exception as exc:
+        log.warning("Tidak bisa buka gambar otomatis: %s", exc)
+
+
+def tanya(prompt: str, validator=None, pesan_error="Input tidak valid.") -> str:
     while True:
-        otp = input("  Masukkan OTP: ").strip()
-        if otp.isdigit() and 4 <= len(otp) <= 8:
-            return otp
-        print("  OTP tidak valid. Masukkan angka 4-8 digit.")
+        nilai = input(f"  {prompt}: ").strip()
+        if validator is None or validator(nilai):
+            return nilai
+        print(f"  {pesan_error}")
 
 
-# ── KPRO session ─────────────────────────────────────────────────────────────
+# ── Ambil halaman login + captcha ────────────────────────────────────────────
 
-def create_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    return s
-
-
-def login(session: requests.Session) -> None:
-    log.info("Login dengan username %s ...", USERNAME)
-    payload = {"username": USERNAME, "password": PASSWORD}
-    resp = session.post(f"{BASE_URL}/api/login", json=payload, timeout=30)
-
-    if resp.status_code == 404:
-        session.headers.update({"Content-Type": "application/x-www-form-urlencoded"})
-        resp = session.post(
-            f"{BASE_URL}/login",
-            data={"username": USERNAME, "password": PASSWORD},
-            timeout=30,
-            allow_redirects=True,
-        )
-        session.headers.update({"Content-Type": "application/json"})
-
+def get_login_page(session: requests.Session) -> BeautifulSoup:
+    log.info("Membuka halaman login ...")
+    resp = session.get(f"{BASE_URL}/login", timeout=30, allow_redirects=True)
     resp.raise_for_status()
-    log.info("Login awal berhasil (HTTP %d).", resp.status_code)
+    return BeautifulSoup(resp.text, "html.parser")
+
+
+def ambil_captcha(session: requests.Session, soup: BeautifulSoup) -> str:
+    """
+    Temukan gambar captcha di HTML, download, simpan ke file,
+    buka otomatis, minta user ketik teksnya.
+    """
+    # Cari tag <img> yang mengandung kata 'captcha'
+    img_tag = soup.find("img", src=re.compile(r"captcha", re.I))
+    if not img_tag:
+        # Coba cari semua img dan pilih yang bukan logo/icon
+        imgs = soup.find_all("img")
+        for img in imgs:
+            src = img.get("src", "")
+            if any(kw in src.lower() for kw in ["captcha", "verify", "code", "random"]):
+                img_tag = img
+                break
+
+    if not img_tag:
+        print("\n  [PERINGATAN] Gambar captcha tidak ditemukan otomatis.")
+        print(f"  Buka manual: {BASE_URL}/login")
+        return tanya("Masukkan teks captcha yang kamu lihat")
+
+    src = img_tag.get("src", "")
+    # Jika src relatif, tambahkan base URL
+    if src.startswith("/"):
+        captcha_url = BASE_URL.rstrip("/") + src
+    elif src.startswith("http"):
+        captcha_url = src
+    else:
+        captcha_url = f"{BASE_URL}/{src}"
+
+    log.info("Download captcha dari: %s", captcha_url)
+    resp = session.get(captcha_url, timeout=15)
+    resp.raise_for_status()
+
+    tmp = Path("captcha_tmp.png")
+    tmp.write_bytes(resp.content)
+
+    print("\n" + "="*52)
+    print("  Gambar captcha disimpan di:", tmp.resolve())
+    print("  Membuka gambar captcha ...")
+    print("="*52)
+    buka_gambar(tmp)
+
+    return tanya(
+        "Masukkan teks captcha (perhatikan huruf besar/kecil)",
+        lambda v: len(v) >= 1,
+    )
+
+
+# ── Login ─────────────────────────────────────────────────────────────────────
+
+def login(session: requests.Session, soup: BeautifulSoup, captcha_teks: str) -> None:
+    log.info("Login dengan username %s ...", USERNAME)
+
+    # Cari action URL dari form
+    form = soup.find("form")
+    action = BASE_URL + "/login"
+    if form and form.get("action"):
+        act = form["action"]
+        action = act if act.startswith("http") else BASE_URL.rstrip("/") + "/" + act.lstrip("/")
+
+    # Ambil semua hidden input (termasuk CSRF token jika ada)
+    payload = {}
+    if form:
+        for inp in form.find_all("input", type="hidden"):
+            if inp.get("name"):
+                payload[inp["name"]] = inp.get("value", "")
+
+    # Isi field utama
+    payload.update({
+        "username": USERNAME,
+        "password": PASSWORD,
+        "captcha": captcha_teks,
+        "agree":   "on",        # checkbox Term of Use
+    })
+
+    session.headers.update({
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": f"{BASE_URL}/login",
+    })
+
+    resp = session.post(action, data=payload, timeout=30, allow_redirects=True)
+    resp.raise_for_status()
+
+    # Cek apakah masih di halaman login (berarti gagal)
+    if "captcha" in resp.text.lower() and "sign in" in resp.text.lower():
+        raise ValueError("Login gagal — captcha mungkin salah atau kredensial tidak valid.")
+
+    log.info("Login berhasil (HTTP %d).", resp.status_code)
+
+
+# ── OTP ──────────────────────────────────────────────────────────────────────
+
+def input_otp_manual() -> str:
+    print("\n" + "="*52)
+    print("  Cek Telegram kamu — OTP dikirim oleh bot KPRO.")
+    print("  (Jika ada notif 'Join New Bot', join dulu botnya)")
+    print("="*52)
+    return tanya(
+        "Masukkan OTP",
+        lambda v: v.isdigit() and 4 <= len(v) <= 8,
+        "OTP tidak valid. Masukkan angka 4-8 digit.",
+    )
 
 
 def submit_otp(session: requests.Session, otp: str) -> None:
     log.info("Mengirim OTP %s ...", otp)
+    session.headers.update({"Content-Type": "application/json"})
     payload = {"otp": otp}
 
-    for endpoint in (f"{BASE_URL}/api/verify-otp", f"{BASE_URL}/verify-otp"):
+    for endpoint in (f"{BASE_URL}/api/verify-otp", f"{BASE_URL}/verify-otp", f"{BASE_URL}/otp"):
         try:
             resp = session.post(endpoint, json=payload, timeout=30)
             if resp.status_code == 404:
@@ -102,6 +203,8 @@ def submit_otp(session: requests.Session, otp: str) -> None:
 
     raise RuntimeError("Semua endpoint OTP gagal.")
 
+
+# ── Download Excel ────────────────────────────────────────────────────────────
 
 def download_excel(session: requests.Session) -> bytes:
     candidates = [
@@ -137,13 +240,26 @@ def save_file(data: bytes) -> Path:
     return filename
 
 
-# ── Main dengan retry ────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def run_once() -> Path:
-    session = create_session()
-    login(session)
-    otp = get_otp_manual()
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # 1. Buka halaman login
+    soup = get_login_page(session)
+
+    # 2. Ambil & input captcha manual
+    captcha_teks = ambil_captcha(session, soup)
+
+    # 3. Login (dengan captcha + agree checkbox)
+    login(session, soup, captcha_teks)
+
+    # 4. Input OTP manual dari Telegram
+    otp = input_otp_manual()
     submit_otp(session, otp)
+
+    # 5. Download Excel
     data = download_excel(session)
     return save_file(data)
 
@@ -158,7 +274,11 @@ def main() -> None:
         try:
             saved = run_once()
             print(f"\nSelesai! File tersimpan di: {saved}")
+            Path("captcha_tmp.png").unlink(missing_ok=True)
             return
+        except ValueError as exc:
+            log.error("%s", exc)
+            print("\n  Coba lagi dengan captcha yang benar.\n")
         except requests.HTTPError as exc:
             log.error("HTTP error: %s", exc)
         except RuntimeError as exc:
