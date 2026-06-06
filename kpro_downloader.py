@@ -51,16 +51,23 @@ HEADERS = {
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
-def buka_gambar(path: Path) -> None:
+def buka_dengan_browser(path: Path) -> None:
+    """Buka file gambar di browser default — lebih reliable dari image viewer."""
+    import webbrowser
     try:
-        if sys.platform == "win32":
-            os.startfile(path)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", str(path)], check=False)
-        else:
-            subprocess.run(["xdg-open", str(path)], check=False)
+        webbrowser.open(path.resolve().as_uri())
     except Exception as exc:
-        log.warning("Tidak bisa buka gambar otomatis: %s", exc)
+        log.warning("Tidak bisa buka gambar di browser: %s", exc)
+        # Fallback ke aplikasi default
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as exc2:
+            log.warning("Tidak bisa buka gambar: %s", exc2)
 
 
 def tanya(prompt: str, validator=None, pesan_error="Input tidak valid.") -> str:
@@ -114,14 +121,29 @@ def ambil_captcha(session: requests.Session, soup: BeautifulSoup) -> str:
     resp = session.get(captcha_url, timeout=15)
     resp.raise_for_status()
 
-    tmp = Path("captcha_tmp.png")
+    # Tentukan ekstensi dari Content-Type
+    content_type = resp.headers.get("Content-Type", "")
+    ext_map = {
+        "jpeg": ".jpg", "jpg": ".jpg",
+        "png": ".png", "gif": ".gif",
+        "bmp": ".bmp", "webp": ".webp",
+    }
+    ext = ".png"  # default
+    for k, v in ext_map.items():
+        if k in content_type.lower():
+            ext = v
+            break
+
+    tmp = Path(f"captcha_tmp{ext}")
     tmp.write_bytes(resp.content)
 
     print("\n" + "="*52)
     print("  Gambar captcha disimpan di:", tmp.resolve())
-    print("  Membuka gambar captcha ...")
+    print("  Membuka gambar captcha di browser ...")
     print("="*52)
-    buka_gambar(tmp)
+
+    # Buka dengan browser (lebih reliable dari image viewer)
+    buka_dengan_browser(tmp)
 
     return tanya(
         "Masukkan teks captcha (perhatikan huruf besar/kecil)",
@@ -274,7 +296,8 @@ def main() -> None:
         try:
             saved = run_once()
             print(f"\nSelesai! File tersimpan di: {saved}")
-            Path("captcha_tmp.png").unlink(missing_ok=True)
+            for f in Path(".").glob("captcha_tmp.*"):
+                f.unlink(missing_ok=True)
             return
         except ValueError as exc:
             log.error("%s", exc)
