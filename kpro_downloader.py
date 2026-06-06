@@ -89,64 +89,27 @@ def get_login_page(session: requests.Session) -> BeautifulSoup:
 
 def ambil_captcha(session: requests.Session, soup: BeautifulSoup) -> str:
     """
-    Temukan gambar captcha di HTML, download, simpan ke file,
-    buka otomatis, minta user ketik teksnya.
+    Buka halaman login di browser agar user bisa lihat captcha langsung,
+    lalu minta user ketik teksnya di terminal.
     """
-    # Cari tag <img> yang mengandung kata 'captcha'
-    img_tag = soup.find("img", src=re.compile(r"captcha", re.I))
-    if not img_tag:
-        # Coba cari semua img dan pilih yang bukan logo/icon
-        imgs = soup.find_all("img")
-        for img in imgs:
-            src = img.get("src", "")
-            if any(kw in src.lower() for kw in ["captcha", "verify", "code", "random"]):
-                img_tag = img
-                break
+    import webbrowser
 
-    if not img_tag:
-        print("\n  [PERINGATAN] Gambar captcha tidak ditemukan otomatis.")
-        print(f"  Buka manual: {BASE_URL}/login")
-        return tanya("Masukkan teks captcha yang kamu lihat")
-
-    src = img_tag.get("src", "")
-    # Jika src relatif, tambahkan base URL
-    if src.startswith("/"):
-        captcha_url = BASE_URL.rstrip("/") + src
-    elif src.startswith("http"):
-        captcha_url = src
-    else:
-        captcha_url = f"{BASE_URL}/{src}"
-
-    log.info("Download captcha dari: %s", captcha_url)
-    resp = session.get(captcha_url, timeout=15)
-    resp.raise_for_status()
-
-    # Tentukan ekstensi dari Content-Type
-    content_type = resp.headers.get("Content-Type", "")
-    ext_map = {
-        "jpeg": ".jpg", "jpg": ".jpg",
-        "png": ".png", "gif": ".gif",
-        "bmp": ".bmp", "webp": ".webp",
-    }
-    ext = ".png"  # default
-    for k, v in ext_map.items():
-        if k in content_type.lower():
-            ext = v
-            break
-
-    tmp = Path(f"captcha_tmp{ext}")
-    tmp.write_bytes(resp.content)
+    login_url = f"{BASE_URL}/login"
 
     print("\n" + "="*52)
-    print("  Gambar captcha disimpan di:", tmp.resolve())
-    print("  Membuka gambar captcha di browser ...")
+    print("  Membuka halaman login di browser kamu ...")
+    print(f"  URL: {login_url}")
+    print("  Lihat gambar CAPTCHA di browser tersebut.")
     print("="*52)
 
-    # Buka dengan browser (lebih reliable dari image viewer)
-    buka_dengan_browser(tmp)
+    try:
+        webbrowser.open(login_url)
+    except Exception as exc:
+        log.warning("Tidak bisa buka browser otomatis: %s", exc)
+        print(f"\n  Buka manual di browser: {login_url}")
 
     return tanya(
-        "Masukkan teks captcha (perhatikan huruf besar/kecil)",
+        "Masukkan teks captcha yang kamu lihat di browser",
         lambda v: len(v) >= 1,
     )
 
